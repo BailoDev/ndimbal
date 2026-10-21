@@ -1,10 +1,11 @@
 import { useMemo, useState, useEffect, useCallback } from 'react';
 import { Layers, ArrowUp, ArrowDown, Users, UserCog, ShieldCheck, AlertCircle, Search, Flame } from 'lucide-react';
-import type { Report, ReportCategory, Profile } from '@/lib/supabase';
+import type { Report, ReportCategory, Profile, ReportStatus } from '@/lib/supabase';
 import {
   supabase,
   CATEGORIES,
   CATEGORY_META,
+  ALL_STATUSES,
   STATUS_ORDER,
   STATUS_META,
 } from '@/lib/supabase';
@@ -29,6 +30,8 @@ export function AdminView({ onSelect }: Props) {
   const [catFilter, setCatFilter] = useState<ReportCategory | 'all'>('all');
   const [search, setSearch] = useState('');
   const [urgentBusy, setUrgentBusy] = useState<string | null>(null);
+  const [statusBusy, setStatusBusy] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
 
   // User management state
   const [allProfiles, setAllProfiles] = useState<Profile[]>([]);
@@ -92,6 +95,24 @@ export function AdminView({ onSelect }: Props) {
     });
     setUrgentBusy(null);
     if (!error) await reload();
+  }
+
+  async function changeStatus(r: Report, status: ReportStatus) {
+    if (status === r.status) return;
+    setStatusBusy(r.id);
+    setStatusError(null);
+    const { error } = await supabase.rpc('update_report', {
+      p_report_id: r.id,
+      p_status: status,
+      p_assigned_to: r.assigned_to ?? '',
+      p_officer_notes: r.officer_notes ?? '',
+    });
+    setStatusBusy(null);
+    if (error) {
+      setStatusError(`Could not update ${r.reference}. Please try again.`);
+      return;
+    }
+    await reload();
   }
 
   const byCategory = useMemo(() => {
@@ -323,6 +344,12 @@ export function AdminView({ onSelect }: Props) {
           </div>
         ) : (
           <div className="mt-3 space-y-1.5">
+            {statusError && (
+              <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 ring-1 ring-red-200">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                {statusError}
+              </div>
+            )}
             {sorted.length === 0 && (
               <p className="py-6 text-center text-sm text-slate-500">
                 No report matches that report ID.
@@ -360,6 +387,19 @@ export function AdminView({ onSelect }: Props) {
                 <button onClick={() => onSelect(r)} className="shrink-0">
                   <StatusBadge status={r.status} />
                 </button>
+                <select
+                  aria-label={`Update status for ${r.reference}`}
+                  value={r.status}
+                  onChange={(e) => changeStatus(r, e.target.value as ReportStatus)}
+                  disabled={statusBusy === r.id}
+                  className="max-w-28 shrink-0 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 outline-none focus:border-emerald-400 disabled:opacity-50"
+                >
+                  {ALL_STATUSES.map((status) => (
+                    <option key={status} value={status}>
+                      {status === 'review' ? 'Approve · Assigned' : STATUS_META[status].label}
+                    </option>
+                  ))}
+                </select>
               </div>
             ))}
           </div>
