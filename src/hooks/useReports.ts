@@ -34,6 +34,7 @@ export function useReports() {
       assignment_status: report.assignment_status ?? 'pending',
       has_voice_note: false,
     })) as Report[];
+    baseReports.sort((a, b) => Number(b.is_urgent) - Number(a.is_urgent));
 
     // For officers/admins, fetch voice notes separately to set has_voice_note.
     // Citizens and anon users don't need this flag (they can't play voice notes).
