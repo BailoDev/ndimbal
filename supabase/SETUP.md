@@ -2,7 +2,7 @@
 
 ## Apply the database schema
 
-In the Supabase Dashboard for the project configured in `.env.local`, open **SQL Editor**, create a query, paste the contents of `migrations/20261020000000_initial_schema.sql`, and run it. This creates the tables, policies, report RPCs, routing rules, notification triggers, and private voice-note bucket used by the app.
+In the Supabase Dashboard for the project configured in `.env.local`, open **SQL Editor** and run the migration files in timestamp order. For a new project, run `migrations/20261020000000_initial_schema.sql` first, then `migrations/20261021000000_voice_only_reports.sql`. If the initial schema is already installed, run only the voice-only reports migration. The migrations create the tables, policies, report RPCs, routing rules, notification triggers, and private voice-note bucket used by the app.
 
 Set the site URL and allowed redirect URLs for the local and deployed app. The app intentionally has no public signup flow. To prevent account creation through Supabase's API too, open **Authentication → Settings** and disable **Allow new users to sign up** (the setting may be under **User Signups**). Existing users can still sign in.
 

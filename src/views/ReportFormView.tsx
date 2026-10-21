@@ -20,7 +20,7 @@ export function ReportFormView({ onTrack }: Props) {
   const { t } = useI18n();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [category, setCategory] = useState<ReportCategory>('roads');
+  const [category, setCategory] = useState<ReportCategory>('other');
   const [location, setLocation] = useState('');
   const [photoUrl, setPhotoUrl] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -28,10 +28,18 @@ export function ReportFormView({ onTrack }: Props) {
   const [successRef, setSuccessRef] = useState<string | null>(null);
   const [successInst, setSuccessInst] = useState<string | null>(null);
   const [hasVoiceNote, setHasVoiceNote] = useState(false);
+  const [voiceUploadError, setVoiceUploadError] = useState<string | null>(null);
+  const [voiceUploadBusy, setVoiceUploadBusy] = useState(false);
+  const [pendingVoiceUpload, setPendingVoiceUpload] = useState<{
+    reportId: string;
+    token: string;
+    extension: string;
+    durationSeconds: number;
+  } | null>(null);
   const [isUrgent, setIsUrgent] = useState(false);
   const [streetName, setStreetName] = useState('');
   const [latitude, setLatitude] = useState<number | null>(null);
-  const [longitude, setLongitude] = useState(null as number | null);
+  const [longitude, setLongitude] = useState<number | null>(null);
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState<string | null>(null);
 
@@ -39,8 +47,53 @@ export function ReportFormView({ onTrack }: Props) {
   const voiceDurationRef = useRef<number>(0);
 
   const hasValidText = title.trim().length >= 5 && description.trim().length >= 10;
-  const valid = location.trim().length > 0 && (hasValidText || hasVoiceNote);
+  const valid = hasVoiceNote || (location.trim().length > 0 && hasValidText);
   const previewInst = previewInstitution(category, location);
+
+  async function uploadVoiceNote(
+    reportId: string,
+    token: string,
+    extension: string,
+    durationSeconds: number,
+  ) {
+    const storagePath = `${reportId}/${token}.${extension}`;
+    const blob = voiceBlobRef.current;
+    if (!blob) throw new Error('The recorded audio is no longer available.');
+    const { error: uploadError } = await supabase.storage
+      .from('voice-notes')
+      .upload(storagePath, blob, { contentType: blob.type });
+    if (uploadError && !/already exists|duplicate/i.test(uploadError.message)) {
+      throw uploadError;
+    }
+
+    const { error: attachmentError } = await supabase.rpc('attach_voice_note', {
+      p_report_id: reportId,
+      p_upload_token: token,
+      p_duration_seconds: durationSeconds,
+      p_extension: extension,
+    });
+    if (attachmentError) throw attachmentError;
+  }
+
+  async function retryVoiceUpload() {
+    if (!pendingVoiceUpload) return;
+    setVoiceUploadBusy(true);
+    setVoiceUploadError(null);
+    try {
+      await uploadVoiceNote(
+        pendingVoiceUpload.reportId,
+        pendingVoiceUpload.token,
+        pendingVoiceUpload.extension,
+        pendingVoiceUpload.durationSeconds,
+      );
+      setPendingVoiceUpload(null);
+    } catch (cause) {
+      console.error('Voice upload retry failed', cause);
+      setVoiceUploadError('The report was received, but the voice note could not be attached. Please retry.');
+    } finally {
+      setVoiceUploadBusy(false);
+    }
+  }
 
   function useMyLocation() {
     if (!navigator.geolocation) {
@@ -73,83 +126,87 @@ export function ReportFormView({ onTrack }: Props) {
       : null;
 
   async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!valid || submitting) return;
-    setSubmitting(true);
-    setError(null);
+      e.preventDefault();
+      if (!valid || submitting) return;
+      setSubmitting(true);
+      setError(null);
+      setVoiceUploadError(null);
 
-    try {
-      const { data, error: insertError } = await supabase
-        .rpc('submit_report', {
-          p_title: title.trim(),
-          p_description: description.trim(),
+      try {
+        const voiceBlob = voiceBlobRef.current;
+        const reportValues = {
+          p_title: title.trim().length >= 5 ? title.trim() : 'Voice report',
+          p_description:
+            description.trim().length >= 10
+              ? description.trim()
+              : 'Details are provided in the attached voice note.',
           p_category: category,
-          p_location: location.trim(),
+          p_location: location.trim() || 'Location not provided',
           p_street_name: streetName,
           p_latitude: latitude,
           p_longitude: longitude,
           p_photo_url: photoUrl,
           p_is_urgent: isUrgent,
-        })
-        .single();
+        };
+        const { data, error: insertError } = await (voiceBlob
+          ? supabase.rpc('submit_report_with_voice', reportValues)
+          : supabase.rpc('submit_report', reportValues)).single();
 
-      if (insertError || !data) {
-        throw insertError ?? new Error('Report submission returned no data');
-      }
-
-      const submittedReport = data as {
-        id: string;
-        reference: string;
-        assigned_institution: string | null;
-      };
-      const reportId = submittedReport.id;
-      setSuccessInst(submittedReport.assigned_institution);
-
-      if (voiceBlobRef.current) {
-        const { data: userData } = await supabase.auth.getUser();
-        const uid = userData.user?.id;
-        if (uid) {
-          const blob = voiceBlobRef.current;
-          const ext = blob.type.includes('webm') ? 'webm' : 'm4a';
-          const path = `${uid}/${reportId}.${ext}`;
-          const { error: uploadError } = await supabase.storage
-            .from('voice-notes')
-            .upload(path, blob, { contentType: blob.type });
-
-          if (uploadError) {
-            console.error('Voice upload failed', uploadError);
-          } else {
-            const { error: voiceNoteError } = await supabase.from('voice_notes').insert({
-              report_id: reportId,
-              storage_path: path,
-              duration_seconds: voiceDurationRef.current,
-            });
-            if (voiceNoteError) console.error('Voice note metadata insert failed', voiceNoteError);
-          }
-        } else {
-          console.warn('Voice note skipped: sign in to attach voice notes.');
+        if (insertError || !data) {
+          throw insertError ?? new Error('Report submission returned no data');
         }
-      }
 
-      setSuccessRef(submittedReport.reference);
-      setSubmitting(false);
-    } catch (cause) {
-      const backendError = cause as { code?: string; message?: string };
-      const errorMessage = backendError.message ?? 'Unknown Supabase error';
-      console.error('Report insert failed', {
-        code: backendError.code,
-        message: errorMessage,
-      });
-      setSubmitting(false);
-      setError(
-        backendError.code === 'PGRST202' ||
-          backendError.code === 'PGRST205' ||
-          backendError.code === '42P01' ||
-          /schema cache|not found|404/i.test(errorMessage)
-          ? 'The Supabase schema is not installed yet. Follow supabase/SETUP.md, then try again.'
-          : 'Could not submit your report. Please try again.',
-      );
-    }
+        const submittedReport = data as {
+          id: string;
+          reference: string;
+          assigned_institution: string | null;
+          voice_upload_token?: string;
+        };
+        setSuccessInst(submittedReport.assigned_institution);
+
+        if (voiceBlob) {
+          const token = submittedReport.voice_upload_token;
+          if (!token) throw new Error('Voice upload token was not returned');
+          const pendingUpload = {
+            reportId: submittedReport.id,
+            token,
+            extension: voiceBlob.type.includes('webm') ? 'webm' : 'm4a',
+            durationSeconds: voiceDurationRef.current,
+          };
+          setPendingVoiceUpload(pendingUpload);
+          try {
+            await uploadVoiceNote(
+              pendingUpload.reportId,
+              pendingUpload.token,
+              pendingUpload.extension,
+              pendingUpload.durationSeconds,
+            );
+            setPendingVoiceUpload(null);
+          } catch (cause) {
+            console.error('Voice upload failed', cause);
+            setVoiceUploadError('The report was received, but the voice note could not be attached. Please retry.');
+          }
+        }
+
+        setSuccessRef(submittedReport.reference);
+      } catch (cause) {
+        const backendError = cause as { code?: string; message?: string };
+        const errorMessage = backendError.message ?? 'Unknown Supabase error';
+        console.error('Report insert failed', {
+          code: backendError.code,
+          message: errorMessage,
+        });
+        setError(
+          backendError.code === 'PGRST202' ||
+            backendError.code === 'PGRST205' ||
+            backendError.code === '42P01' ||
+            /schema cache|not found|404/i.test(errorMessage)
+            ? 'The Supabase schema is not installed yet. Follow supabase/SETUP.md, then try again.'
+            : 'Could not submit your report. Please try again.',
+        );
+      } finally {
+        setSubmitting(false);
+      }
   }
 
   if (successRef) {
@@ -161,6 +218,21 @@ export function ReportFormView({ onTrack }: Props) {
           </div>
           <h2 className="mt-4 text-xl font-bold text-slate-900">{t('report.success')}</h2>
           <p className="mt-2 text-sm text-slate-600">{t('report.successMsg')}</p>
+          {voiceUploadError && (
+            <div className="mt-4 rounded-xl bg-amber-50 p-3 text-left text-sm text-amber-800 ring-1 ring-amber-200">
+              <p>{voiceUploadError}</p>
+              {pendingVoiceUpload && (
+                <button
+                  type="button"
+                  onClick={retryVoiceUpload}
+                  disabled={voiceUploadBusy}
+                  className="mt-2 font-semibold underline disabled:opacity-50"
+                >
+                  {voiceUploadBusy ? 'Retrying…' : 'Retry voice upload'}
+                </button>
+              )}
+            </div>
+          )}
           <div className="mt-5 rounded-xl bg-slate-900 py-4">
             <div className="text-xs uppercase tracking-wider text-slate-400">{t('report.yourRef')}</div>
             <div className="mt-1 font-mono text-xl font-bold text-emerald-400">{successRef}</div>
@@ -178,7 +250,9 @@ export function ReportFormView({ onTrack }: Props) {
                 <MapPin className="h-4 w-4" />
                 Location
               </span>
-              <span className="font-semibold text-slate-800">{location}</span>
+              <span className="font-semibold text-slate-800">
+                {location.trim() || 'Location not provided'}
+              </span>
             </div>
             <div className="flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5 text-slate-500">
@@ -207,7 +281,7 @@ export function ReportFormView({ onTrack }: Props) {
                 setSuccessRef(null);
                 setTitle('');
                 setDescription('');
-                setCategory('roads');
+                setCategory('other');
                 setLocation('');
                 setPhotoUrl('');
                 setIsUrgent(false);
@@ -215,6 +289,8 @@ export function ReportFormView({ onTrack }: Props) {
                 setLatitude(null);
                 setLongitude(null);
                 setSuccessInst(null);
+                setVoiceUploadError(null);
+                setPendingVoiceUpload(null);
                 voiceBlobRef.current = null;
                 voiceDurationRef.current = 0;
                 setHasVoiceNote(false);
@@ -246,7 +322,12 @@ export function ReportFormView({ onTrack }: Props) {
       </div>
 
       <form onSubmit={submit} className="space-y-5 rounded-2xl bg-white p-5 ring-1 ring-slate-200 sm:p-6">
-        <Field label={t('report.fieldTitle')} hint={t('report.fieldTitleHint')} optional>
+        <Field
+          label={t('report.fieldTitle')}
+          hint={t('report.fieldTitleHint')}
+          required={!hasVoiceNote}
+          optional={hasVoiceNote}
+        >
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -256,7 +337,12 @@ export function ReportFormView({ onTrack }: Props) {
           />
         </Field>
 
-        <Field label={t('report.fieldDesc')} hint={t('report.fieldDescHint')} optional>
+        <Field
+          label={t('report.fieldDesc')}
+          hint={t('report.fieldDescHint')}
+          required={!hasVoiceNote}
+          optional={hasVoiceNote}
+        >
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
@@ -287,7 +373,11 @@ export function ReportFormView({ onTrack }: Props) {
           />
         </div>
 
-        <Field label={t('report.fieldCategory')} required>
+        <Field
+          label={t('report.fieldCategory')}
+          required={!hasVoiceNote}
+          optional={hasVoiceNote}
+        >
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {CATEGORIES.map((c) => {
               const active = category === c;
@@ -310,7 +400,11 @@ export function ReportFormView({ onTrack }: Props) {
           </div>
         </Field>
 
-        <Field label={t('report.fieldLocation')} required>
+        <Field
+          label={t('report.fieldLocation')}
+          required={!hasVoiceNote}
+          optional={hasVoiceNote}
+        >
           <input
             value={location}
             onChange={(e) => setLocation(e.target.value)}
